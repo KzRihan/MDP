@@ -3,7 +3,7 @@
 # Requires: expect installed (brew install expect)
 
 REMOTE_USER="pi"
-REMOTE_HOST="192.168.9.9"
+REMOTE_HOST="192.168.20.1"
 REMOTE_PASS="raspberry"
 REMOTE_DIR="MDP"
 # Put python in the foreground of the TTY so it receives SIGINT

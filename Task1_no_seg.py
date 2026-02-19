@@ -11,7 +11,7 @@ from stitching import add_to_stitching_dict, stitch_images
 from StreamListener import StreamListener
 from pathfinding.consts import Direction
 
-PI_IP = "192.168.9.9"
+PI_IP = "192.168.20.1"
 PORT = 5000
 
 class Task1:

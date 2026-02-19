@@ -10,7 +10,7 @@ from pathfinding.pathfinding import pathfinding
 from stitching import add_to_stitching_dict, stitch_images, add_to_stitching_dict_2, stitch_images_2
 from StreamListener import StreamListener
 
-PI_IP = "192.168.9.9"
+PI_IP = "192.168.20.1"
 PORT = 5000
 
 class Task2:
