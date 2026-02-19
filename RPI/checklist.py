@@ -45,6 +45,9 @@ class Checklist:
         self.segments_index = 0
         self.obstacle_order = []
         
+        self.current_segment_commands = []  # Commands in the current segment
+        self.command_index = 0  # Index within current segment
+        
         self.timeout = 2  # seconds
 
     def start_checklist_one(self):
@@ -148,10 +151,18 @@ class Checklist:
                     self.obstacle_order = path['obstacle_ids']
                     logging.info(f"Received path segments: {self.segments}")
                     
-                    cmd = ",".join(self.segments[self.segments_index]) + "\n"
-                    self.stm.send(f"{cmd}")
-                    logging.info(f"Sent path segment {self.segments_index + 1} to STM: {cmd}")
+                    # Initialize first segment
+                    self.segments_index = 0
+                    self.current_segment_commands = self.segments[self.segments_index]
                     self.segments_index += 1
+                    self.command_index = 0
+                    
+                    # Send first command of first segment
+                    if self.current_segment_commands:
+                        cmd = self.current_segment_commands[self.command_index] + "\n"
+                        self.command_index += 1
+                        self.stm.send(cmd)
+                        logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
                 elif pc_msg.startswith("OBJECT"):
                     self.detect_image = False
                     msg_split = pc_msg.split(",")[1:]
@@ -189,51 +200,61 @@ class Checklist:
                 #     self.detect_image = True
                 #     message_content = f"DETECT,{self.obstacle_order[self.segments_index - 1]}"
                 #     self.pc.send(message_content.encode("utf-8"))
-                if "OK" in stm_msg:
-                    self.detect_image = True
-                    message_content = f"DETECT,{self.obstacle_order[self.segments_index - 1]}"
-                    self.pc.send(message_content)
+                if "OK" in stm_msg or "ACK" in stm_msg:
+                    # Check if more commands in current segment
+                    more_in_segment = self.command_index < len(self.current_segment_commands)
                     
-                    # end_time = time() + self.timeout
-                    # # if image still being processed, wait until done or timeout
-                    # while self.detect_image and time() < end_time:
-                    #     pass
-                    
-                    # if self.stop_event.is_set():
-                    #     logging.info("Stop event observed")
-                    #     break
-                    self.detect_event.clear()
-                    deadline = time() + self.timeout
-                    while True:
-                        if self.stop_event.is_set():
-                            logging.info("Stop observed in stm_receive; halting.")
-                            try:
-                                self.stm.send("S\n")   # optional
-                            except Exception:
-                                pass
-                            return  # or break the loop
-
-                        if self.detect_event.is_set():
-                            break  # PC replied with OBJECT
-
-                        if time() >= deadline:
-                            logging.info("Detection wait timed out.")
-                            break
-
-                        # tiny sleep to avoid hot loop; stm.receive is separate
-                        # (or use time.sleep(0.01))
-                        pass
-                    
-                    if self.segments_index < len(self.segments):
-                        cmd = ",".join(self.segments[self.segments_index]) + "\n"
-                        self.stm.send(f"{cmd}")
-                        logging.info(f"Sent path segment {self.segments_index + 1}/{len(self.segments)} to STM: {self.segments[self.segments_index]}")
-                        self.segments_index += 1
+                    if more_in_segment:
+                        # Send next command in current segment
+                        cmd = self.current_segment_commands[self.command_index] + "\n"
+                        self.command_index += 1
+                        self.stm.send(cmd)
+                        logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
                     else:
-                        self.pc.send(f'STITCH,{len(self.segments) - 1}') # -1 cause of FIN segment
-                        self.android.disconnect()
-                        self.pc.disconnect()
-                        self.stm.disconnect()
+                        # Current segment finished, request image detection
+                        self.detect_image = True
+                        message_content = f"DETECT,{self.obstacle_order[self.segments_index - 1]}"
+                        self.pc.send(message_content)
+                        
+                        # Wait for detection result or timeout
+                        self.detect_event.clear()
+                        deadline = time() + self.timeout
+                        while True:
+                            if self.stop_event.is_set():
+                                logging.info("Stop observed in stm_receive; halting.")
+                                try:
+                                    self.stm.send("S\n")  # Stop command
+                                except Exception:
+                                    pass
+                                return
+
+                            if self.detect_event.is_set():
+                                break  # PC replied with OBJECT
+
+                            if time() >= deadline:
+                                logging.info("Detection wait timed out.")
+                                break
+                            pass
+                        
+                        # Move to next segment
+                        if self.segments_index < len(self.segments):
+                            self.current_segment_commands = self.segments[self.segments_index]
+                            self.segments_index += 1
+                            self.command_index = 0
+                            
+                            # Send first command of next segment
+                            if self.current_segment_commands:
+                                cmd = self.current_segment_commands[self.command_index] + "\n"
+                                self.command_index += 1
+                                self.stm.send(cmd)
+                                logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
+                        else:
+                            # All segments complete
+                            self.pc.send(f'STITCH,{len(self.segments) - 1}')  # -1 for FIN segment
+                            logging.info("All commands sent, requesting stitch.")
+                            self.android.disconnect()
+                            self.pc.disconnect()
+                            self.stm.disconnect()
             except OSError as e:
                     print(f"Error: {e}")
                     continue

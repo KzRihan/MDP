@@ -40,6 +40,9 @@ class Task1:
         self.segments_index = 0
         self.obstacle_order = []
         
+        self.current_segment_commands = []  # Commands in the current segment
+        self.command_index = 0  # Index within current segment
+        
         self.directions = []
         self.direction_index = 0
         
@@ -63,12 +66,16 @@ class Task1:
                     self.started = True
                     with self._idx_lock:
                         self.segments_index = 0
-                        seg = self.segments[self.segments_index]
+                        self.current_segment_commands = self.segments[self.segments_index]
                         self.segments_index += 1
+                        self.command_index = 0
                     
-                    cmd = ",".join(seg) + "\n"
-                    self.stm.send(cmd)
-                    logging.info(f"Sent path segment {self.segments_index} to STM: {seg}")
+                    # Send first command of first segment
+                    if self.current_segment_commands:
+                        cmd = self.current_segment_commands[self.command_index] + "\n"
+                        self.command_index += 1
+                        self.stm.send(cmd)
+                        logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
                 else:
                     msg_parts = android_msg.split(',')
                     if msg_parts[0] == "OBSTACLE":
@@ -136,30 +143,44 @@ class Task1:
                     logging.info(f"STM Error. Resending path segment{self.segments_index - 1}/{len(self.segments)}: {cmd}")
                     
                     self.image_done.wait(0.1)
-                elif "OK" in stm_msg:
+                elif "OK" in stm_msg or "ACK" in stm_msg:
                     with self._idx_lock:
-                        just_finished_idx = self.segments_index - 1
-                        more_to_send = self.segments_index < len(self.segments)
-                    
-                    if just_finished_idx >= 0 and just_finished_idx < len(self.obstacle_order):
-                        self.image_done.clear()
-                        message_content = f"DETECT,{self.obstacle_order[just_finished_idx]}"
-                        self.pc.send(message_content)
+                        # Check if more commands in current segment
+                        more_in_segment = self.command_index < len(self.current_segment_commands)
                         
-                        self.image_done.wait(timeout=self.timeout)
-                    
-                    if more_to_send:
-                        with self._idx_lock:
-                            seg = self.segments[self.segments_index]
-                            self.segments_index += 1
-                        cmd = ",".join(seg) + "\n"
-                        self.stm.send(cmd)
-                        logging.info(f"Sent path segment {self.segments_index}/{len(self.segments)} to STM: {seg}")
-                    else:
-                        self.pc.send(f'STITCH,{len(self.segments) - 1}') # -1 cause of FIN segment
-                        # self.android.disconnect()
-                        # self.pc.disconnect()
-                        # self.stm.disconnect()
+                        if more_in_segment:
+                            # Send next command in current segment
+                            cmd = self.current_segment_commands[self.command_index] + "\n"
+                            self.command_index += 1
+                            self.stm.send(cmd)
+                            logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
+                        else:
+                            # Current segment finished, check for image detection
+                            just_finished_idx = self.segments_index - 1
+                            
+                            if just_finished_idx >= 0 and just_finished_idx < len(self.obstacle_order):
+                                self.image_done.clear()
+                                message_content = f"DETECT,{self.obstacle_order[just_finished_idx]}"
+                                self.pc.send(message_content)
+                                self.image_done.wait(timeout=self.timeout)
+                            
+                            # Move to next segment
+                            more_segments = self.segments_index < len(self.segments)
+                            if more_segments:
+                                self.current_segment_commands = self.segments[self.segments_index]
+                                self.segments_index += 1
+                                self.command_index = 0
+                                
+                                # Send first command of next segment
+                                if self.current_segment_commands:
+                                    cmd = self.current_segment_commands[self.command_index] + "\n"
+                                    self.command_index += 1
+                                    self.stm.send(cmd)
+                                    logging.info(f"Sent command {self.command_index}/{len(self.current_segment_commands)} to STM: {cmd.strip()}")
+                            else:
+                                # All segments complete
+                                self.pc.send(f'STITCH,{len(self.segments) - 1}')  # -1 for FIN segment
+                                logging.info("All commands sent, requesting stitch.")
                 elif "done" in stm_msg:
                     if self.direction_index < len(self.directions):
                         # x = self.directions[self.direction_index]['x']
