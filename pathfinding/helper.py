@@ -1,5 +1,14 @@
 from pathfinding.consts import WIDTH, HEIGHT, Direction, MOVE_DIRECTION
 
+# Default speed for motor commands (0-100, multiplied by 71 for PWM 0-7199)
+DEFAULT_SPEED = 50
+
+# Direction Values
+# NORTH = 0 (up)
+# EAST  = 2 (right)  
+# SOUTH = 4 (down)
+# WEST  = 6 (left)
+
 
 def is_valid(center_x: int, center_y: int):
     """Checks if given position is within bounds
@@ -265,14 +274,64 @@ def is_valid(center_x: int, center_y: int):
 #     time = time_generator(compressed_commands)
 #     return compressed_commands,time
 
-def command_generator(states, obstacles):
+def _get_snap_command(screenshot_id: int, obstacle: dict, robot_position) -> str:
+    """Generate SNAP command with direction suffix based on obstacle and robot positions.
+    
+    Args:
+        screenshot_id: ID of the obstacle to photograph
+        obstacle: Dict with obstacle info {'x', 'y', 'd', 'id'}
+        robot_position: Current robot state with x, y, direction
+    
+    Returns:
+        SNAP command string like 'SNAP1_L', 'SNAP1_C', or 'SNAP1_R'
     """
-    Generate movement + turn + SNAP commands for the robot.
-    Handles straight, 45° diagonals, and 90° arcs consistently with get_neighbors.
+    ob_d = obstacle['d']
+    robot_d = robot_position.direction
+    
+    # Mapping: (obstacle_direction, robot_direction) -> (compare_attr, left_cond, right_cond)
+    # left_cond/right_cond: True if obstacle coord > robot coord means L/R respectively
+    direction_map = {
+        (6, 2): ('y', True, False),   # Obstacle WEST, robot EAST
+        (2, 6): ('y', False, True),   # Obstacle EAST, robot WEST
+        (0, 4): ('x', True, False),   # Obstacle NORTH, robot SOUTH
+        (4, 0): ('x', False, True),   # Obstacle SOUTH, robot NORTH
+    }
+    
+    key = (ob_d, int(robot_d))
+    if key not in direction_map:
+        return f"SNAP{screenshot_id}"
+    
+    attr, left_when_greater, right_when_greater = direction_map[key]
+    ob_val = obstacle[attr]
+    robot_val = getattr(robot_position, attr)
+    
+    if ob_val == robot_val:
+        return f"SNAP{screenshot_id}_C"
+    elif ob_val > robot_val:
+        suffix = '_L' if left_when_greater else '_R'
+    else:
+        suffix = '_R' if left_when_greater else '_L'
+    
+    return f"SNAP{screenshot_id}{suffix}"
+
+
+def command_generator(states, obstacles, speed=None):
+    """
+    Generate movement + turn + SNAP commands for the robot using new motor protocol.
+    
+    Args:
+        states: List of State objects representing robot path
+        obstacles: List of obstacles, each a dict with keys 'x', 'y', 'd', 'id'
+        speed: Motor speed (0-100). If None, uses DEFAULT_SPEED
+        
+    Returns:
+        Tuple of (commands, time_list) where commands are motor protocol strings
     """
 
     obstacles_dict = {ob['id']: ob for ob in obstacles}
+    motor_speed = speed if speed is not None else DEFAULT_SPEED
     commands = []
+    cmd_id = 1
 
     for i in range(1, len(states)):
         prev = states[i - 1]
@@ -284,115 +343,139 @@ def command_generator(states, obstacles):
         new_dir = int(curr.direction)
         diff = (new_dir - old_dir) % 8
 
-        # # === Case 1: Straight ===
-        # if curr.direction == prev.direction:
-        #     if (dx > 0 and curr.direction in [Direction.EAST]) \
-        #        or (dx < 0 and curr.direction in [Direction.WEST]) \
-        #        or (dy > 0 and curr.direction in [Direction.NORTH]) \
-        #        or (dy < 0 and curr.direction in [Direction.SOUTH]):
-        #         commands.append("FW10")
-        #     else:
-        #         commands.append("BW10")
-
-        # === Case 1: Straight ===
+        # === Case 1: Straight movement (same direction) ===
         if curr.direction == prev.direction:
             # Get the canonical (dx, dy) for this direction
             expected_dx, expected_dy, _ = MOVE_DIRECTION[int(curr.direction)]
 
             if (dx, dy) == (expected_dx, expected_dy):
-                commands.append("FW10")
+                # Forward movement
+                commands.append(f":{cmd_id}/MOTOR/FWD/{motor_speed}/10;")
+                cmd_id += 1
             elif (dx, dy) == (-expected_dx, -expected_dy):
-                commands.append("BW10")
+                # Backward movement
+                commands.append(f":{cmd_id}/MOTOR/REV/{motor_speed}/10;")
+                cmd_id += 1
             else:
                 raise Exception(
                     f"Unexpected straight movement: dir={curr.direction}, "
                     f"expected ({expected_dx},{expected_dy}) or opposite, got ({dx},{dy})"
                 )
+                
         # === Case 2: 45° Diagonal Turns ===
         elif diff == 1:   # +45° clockwise
-            # forward if movement is in same general quadrant
             expected_dx, expected_dy, _ = MOVE_DIRECTION[int(curr.direction)]
-            new_dx,new_dy = expected_dx * dx, expected_dy * dy
+            new_dx, new_dy = expected_dx * dx, expected_dy * dy
             if new_dx > 0 or new_dy > 0:
-                commands.append("FR45")
+                # Forward right 45
+                commands.append(f":{cmd_id}/MOTOR/TURNR/{motor_speed}/45;")
+                cmd_id += 1
             else:
-                commands.append("BL45")
+                # Backward left 45
+                commands.append(f":{cmd_id}/MOTOR/REVTURNL/{motor_speed}/45;")
+                cmd_id += 1
         elif diff == 7:  # -45° counter-clockwise
             expected_dx, expected_dy, _ = MOVE_DIRECTION[int(curr.direction)]
-            new_dx,new_dy = expected_dx * dx, expected_dy * dy
+            new_dx, new_dy = expected_dx * dx, expected_dy * dy
             if new_dx > 0 or new_dy > 0:
-                commands.append("FL45")
+                # Forward left 45
+                commands.append(f":{cmd_id}/MOTOR/TURNL/{motor_speed}/45;")
+                cmd_id += 1
             else:
-                commands.append("BR45")
+                # Backward right 45
+                commands.append(f":{cmd_id}/MOTOR/REVTURNR/{motor_speed}/45;")
+                cmd_id += 1
 
-        # === Case 3: 90° Arcs ===
+        # === Case 3: 90° Turns ===
         elif diff == 2:  # clockwise (FR90 or BL90)
             expected_dx, expected_dy, _ = MOVE_DIRECTION[int(curr.direction)]
-            new_dx,new_dy = expected_dx * dx, expected_dy * dy
+            new_dx, new_dy = expected_dx * dx, expected_dy * dy
             if new_dx > 0 or new_dy > 0:
-                commands.append("FR90")
+                # Forward right 90
+                commands.append(f":{cmd_id}/MOTOR/TURNR/{motor_speed}/90;")
+                cmd_id += 1
             else:
-                commands.append("BL90")
+                # Backward left 90 (reverse turn left)
+                commands.append(f":{cmd_id}/MOTOR/REVTURNL/{motor_speed}/90;")
+                cmd_id += 1
         elif diff == 6:  # counter-clockwise (FL90 or BR90)
             expected_dx, expected_dy, _ = MOVE_DIRECTION[int(curr.direction)]
-            new_dx,new_dy = expected_dx * dx, expected_dy * dy
+            new_dx, new_dy = expected_dx * dx, expected_dy * dy
             if new_dx > 0 or new_dy > 0:
-                commands.append("FL90")
+                # Forward left 90
+                commands.append(f":{cmd_id}/MOTOR/TURNL/{motor_speed}/90;")
+                cmd_id += 1
             else:
-                commands.append("BR90")
+                # Backward right 90 (reverse turn right)
+                commands.append(f":{cmd_id}/MOTOR/REVTURNR/{motor_speed}/90;")
+                cmd_id += 1
 
         # === Case 4: 180° Turn ===
         elif diff == 4:
-            commands.extend(["FR90", "FR90"])
+            # Two 90-degree right turns
+            commands.append(f":{cmd_id}/MOTOR/TURNR/{motor_speed}/90;")
+            cmd_id += 1
+            commands.append(f":{cmd_id}/MOTOR/TURNR/{motor_speed}/90;")
+            cmd_id += 1
 
         else:
             raise Exception(f"Unexpected turn diff: {diff} from {old_dir} -> {new_dir}")
 
-        # === Case 5: SNAP ===
+        # === Case 5: SNAP command for taking pictures ===
         if curr.screenshot_id != -1:
-            ob = obstacles_dict[curr.screenshot_id]
-            rob = curr
+            snap_cmd = _get_snap_command(
+                curr.screenshot_id,
+                obstacles_dict[curr.screenshot_id],
+                curr
+            )
+            commands.append(snap_cmd)
 
-            if ob['d'] == Direction.WEST and rob.direction == Direction.EAST:
-                if ob['y'] > rob.y: commands.append(f"SNAP{curr.screenshot_id}_L")
-                elif ob['y'] == rob.y: commands.append(f"SNAP{curr.screenshot_id}_C")
-                else: commands.append(f"SNAP{curr.screenshot_id}_R")
+    # Final stop command
+    commands.append(f":{cmd_id}/MOTOR/STOP/0/0;")
+    cmd_id += 1
+    commands.append("FIN")  # Keep FIN marker for higher-level processing
 
-            elif ob['d'] == Direction.EAST and rob.direction == Direction.WEST:
-                if ob['y'] > rob.y: commands.append(f"SNAP{curr.screenshot_id}_R")
-                elif ob['y'] == rob.y: commands.append(f"SNAP{curr.screenshot_id}_C")
-                else: commands.append(f"SNAP{curr.screenshot_id}_L")
-
-            elif ob['d'] == Direction.NORTH and rob.direction == Direction.SOUTH:
-                if ob['x'] > rob.x: commands.append(f"SNAP{curr.screenshot_id}_L")
-                elif ob['x'] == rob.x: commands.append(f"SNAP{curr.screenshot_id}_C")
-                else: commands.append(f"SNAP{curr.screenshot_id}_R")
-
-            elif ob['d'] == Direction.SOUTH and rob.direction == Direction.NORTH:
-                if ob['x'] > rob.x: commands.append(f"SNAP{curr.screenshot_id}_R")
-                elif ob['x'] == rob.x: commands.append(f"SNAP{curr.screenshot_id}_C")
-                else: commands.append(f"SNAP{curr.screenshot_id}_L")
-
-    # Final stop
-    commands.append("FIN")
-
-    # === Compress FW/BW ===
+    # === Compress consecutive FWD/REV commands ===
     compressed = [commands[0]]
     for i in range(1, len(commands)):
-        if commands[i].startswith("FW") and compressed[-1].startswith("FW"):
-            steps = int(compressed[-1][2:])
-            if steps != 180:
-                compressed[-1] = f"FW{steps + 10}"
+        # Check if both are forward commands
+        if "/MOTOR/FWD/" in commands[i] and "/MOTOR/FWD/" in compressed[-1]:
+            # Extract distance from previous command
+            parts = compressed[-1].split("/")
+            distance = int(parts[-1].rstrip(";"))
+            # Add 10 to distance if not at max
+            if distance < 180:
+                parts[-1] = f"{distance + 10};"
+                compressed[-1] = "/".join(parts)
                 continue
-        elif commands[i].startswith("BW") and compressed[-1].startswith("BW"):
-            steps = int(compressed[-1][2:])
-            if steps != 180:
-                compressed[-1] = f"BW{steps + 10}"
+        # Check if both are reverse commands
+        elif "/MOTOR/REV/" in commands[i] and "/MOTOR/REV/" in compressed[-1]:
+            # Extract distance from previous command
+            parts = compressed[-1].split("/")
+            distance = int(parts[-1].rstrip(";"))
+            # Add 10 to distance if not at max
+            if distance < 180:
+                parts[-1] = f"{distance + 10};"
+                compressed[-1] = "/".join(parts)
                 continue
         compressed.append(commands[i])
 
-    time = time_generator(compressed)
-    return compressed, time
+    # Renumber command IDs to be sequential after compression
+    final_commands = []
+    motor_cmd_id = 1
+    for cmd in compressed:
+        if cmd.startswith(":"):  # Motor protocol command
+            # Extract command parts and replace ID
+            parts = cmd.split("/")
+            parts[0] = f":{motor_cmd_id}"
+            final_commands.append("/".join(parts))
+            motor_cmd_id += 1
+        else:
+            # SNAP, FIN, or other non-motor commands
+            final_commands.append(cmd)
+    
+    time = time_generator(final_commands)
+    return final_commands, time
 
 
 
@@ -438,11 +521,12 @@ def command_generator(states, obstacles):
 
 def time_generator(compressed_commands: list):
     """
-    This function takes in a list of commands and generates the time taken
+    This function takes in a list of commands and generates the time taken.
+    Handles both new motor protocol commands and legacy SNAP/FIN commands.
 
     Inputs
     ------
-    compressed_commands: list of commands 
+    compressed_commands: list of commands in motor protocol format
 
     Returns
     -------
@@ -451,32 +535,49 @@ def time_generator(compressed_commands: list):
     time = []
     
     for command in compressed_commands:
-        # Forward / Backward
-        if command.startswith("FW") or command.startswith("BW"):
-            steps = int(command[2:])
-            # 3 seconds per 10-unit step
-            time.append(steps / 10 * 3)
-
-        # 45° turns
-        elif command.startswith("FR45") or command.startswith("FL45") \
-             or command.startswith("BR45") or command.startswith("BL45"):
-            time.append(4)  # half of 90°
-
-        # 90° turns
-        elif command.startswith("FR90") or command.startswith("FL90") \
-             or command.startswith("BR90") or command.startswith("BL90"):
-            time.append(8)
-
-        # SNAP (picture taking)
+        # Motor protocol commands (format: :cmdId/MOTOR/action/speed/param;)
+        if command.startswith(":"):
+            parts = command.split("/")
+            if len(parts) >= 4:
+                action = parts[2]
+                param = int(parts[-1].rstrip(";"))
+                
+                if action == "FWD" or action == "REV":
+                    # Forward/Reverse: param is distance in units
+                    # 3 seconds per 10-unit step
+                    time.append(param / 10 * 3)
+                
+                elif action in ["TURNR", "TURNL", "REVTURNR", "REVTURNL"]:
+                    # Turn commands: param is angle in degrees
+                    if param == 45:
+                        time.append(4)  # 45-degree turn
+                    elif param == 90:
+                        time.append(8)  # 90-degree turn
+                    else:
+                        # Estimate time based on angle (8 seconds for 90 degrees)
+                        time.append(param / 90 * 8)
+                
+                elif action == "STOP":
+                    time.append(0)  # Stop command takes no time
+                
+                else:
+                    # Unknown motor action, default to 0
+                    time.append(0)
+            else:
+                # Malformed command, default to 0
+                time.append(0)
+        
+        # Legacy SNAP command for picture taking
         elif command.startswith("SNAP"):
             time.append(0)
-
-        # Finish
+        
+        # Legacy FIN command
         elif command.startswith("FIN"):
             time.append(0)
-
+        
         else:
-            # Safety fallback
-            raise Exception(f"Unknown command in time_generator: {command}")
+            # Unknown command type
+            print(f"Warning: Unknown command in time_generator: {command}")
+            time.append(0)
     
     return time

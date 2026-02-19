@@ -1,13 +1,17 @@
 from enum import Enum
 
 class Direction(int, Enum):
-    NORTH = 0
+    """Robot direction values.
+    Main cardinals: NORTH=0 (up), EAST=2 (right), SOUTH=4 (down), WEST=6 (left)
+    Diagonals: NORTHEAST=1, SOUTHEAST=3, SOUTHWEST=5, NORTHWEST=7
+    """
+    NORTH = 0      # up
     NORTHEAST = 1
-    EAST = 2
+    EAST = 2       # right
     SOUTHEAST = 3
-    SOUTH = 4
+    SOUTH = 4      # down
     SOUTHWEST = 5
-    WEST = 6
+    WEST = 6       # left
     NORTHWEST = 7
     SKIP = 8
 

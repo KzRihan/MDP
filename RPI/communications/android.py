@@ -98,7 +98,7 @@ class Android:
 
             advertise_service(
                 self.server_socket,
-                "MDPGroup9 RPi",
+                "MDPGroup20 RPi",
                 service_id=self.uuid,
                 service_classes=[self.uuid, SERIAL_PORT_CLASS],
                 profiles=[SERIAL_PORT_PROFILE],
